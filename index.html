@@ -1081,15 +1081,18 @@ function renderVariableStroke(ctx, pts, widths, grain){
     return;
   }
   if(!grain){
-    // draw as a series of short segments with interpolated width using filled quads for smoothness
-    ctx.beginPath();
+    // draw each segment as a full line from point i to point i+1, with
+    // interpolated width — round caps/joins keep the line continuous (no gaps)
     for(let i=0;i<pts.length-1;i++){
       ctx.lineWidth=(widths[i]+widths[i+1])/2;
       ctx.beginPath();
       ctx.moveTo(pts[i].x,pts[i].y);
-      const xc=(pts[i].x+pts[i+1].x)/2, yc=(pts[i].y+pts[i+1].y)/2;
-      ctx.lineTo(xc,yc);
+      ctx.lineTo(pts[i+1].x,pts[i+1].y);
       ctx.stroke();
+    }
+    // also fill round caps at every joint so width changes don't show a seam
+    for(let i=1;i<pts.length-1;i++){
+      ctx.beginPath(); ctx.arc(pts[i].x,pts[i].y,widths[i]/2,0,7); ctx.fill();
     }
   } else {
     // grainy texture: stipple along the path, density depends on texture
@@ -1861,11 +1864,11 @@ function init(){
   }
   if(tryRestore()) toast('Previous session restored','🔄');
   setTool('pen');
-  fitZoom();
+  setZoom(1);
   renderThumbs();
   document.getElementById('penSwatch').style.background=Store.color;
 }
-window.addEventListener('resize', ()=>{ fitZoom(); });
+window.addEventListener('resize', ()=>{ /* keep current zoom; user can click Fit to refit */ });
 init();
 </script>
 </body>
