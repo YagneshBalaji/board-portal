@@ -278,6 +278,8 @@ canvas.layer{position:absolute;top:0;left:0;display:block;touch-action:none;}
 .thumb-actions{display:flex;gap:1px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;max-width:108px;}
 .thumb-actions button{width:16px;height:16px;border-radius:4px;font-size:8.5px;color:var(--ui-dim);display:flex;align-items:center;justify-content:center;}
 .thumb-actions button:hover{background:rgba(255,255,255,.12);color:#fff;}
+.thumb-actions button[data-act=del]{color:rgba(192,80,72,.7);}
+.thumb-actions button[data-act=del]:hover{background:rgba(192,57,43,.25);color:#e87070;}
 .thumb-actions button:disabled{opacity:.25;cursor:default;}
 .thumb-actions button:disabled:hover{background:none;color:var(--ui-dim);}
 #add-page-btn{
@@ -285,6 +287,27 @@ canvas.layer{position:absolute;top:0;left:0;display:block;touch-action:none;}
   color:var(--ui-soft);font-size:11px;font-weight:700;text-align:center;transition:.15s;flex-shrink:0;
 }
 #add-page-btn:hover{border-color:var(--brass);color:var(--brass-light);}
+
+/* ── Delete-confirmation panel ──────────────────────────────────────────── */
+#delete-confirm-panel{
+  margin:0 10px;border-radius:var(--r-md);background:linear-gradient(135deg,#1a0f0f,#2a1414);
+  border:1.5px solid rgba(192,57,43,.45);padding:14px 12px 12px;
+  display:none;flex-direction:column;align-items:center;gap:6px;
+  animation:dcpIn .18s var(--ease);flex-shrink:0;
+}
+#delete-confirm-panel.show{display:flex;}
+@keyframes dcpIn{from{opacity:0;transform:scale(.95);}to{opacity:1;transform:scale(1);}}
+.dcp-icon{font-size:22px;line-height:1;}
+.dcp-title{font-family:'Fraunces',serif;font-size:13px;font-weight:700;color:#e8d5d5;letter-spacing:.2px;}
+.dcp-sub{font-size:9.5px;color:rgba(210,150,140,.8);text-align:center;max-width:160px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:100%;}
+.dcp-btns{display:flex;gap:6px;margin-top:4px;width:100%;}
+.dcp-btns button{flex:1;padding:7px 0;border-radius:var(--r-sm);font-size:11px;font-weight:700;transition:.13s;cursor:pointer;border:none;}
+#dcp-cancel{background:rgba(255,255,255,.07);color:var(--ui-soft);}
+#dcp-cancel:hover{background:rgba(255,255,255,.13);color:#fff;}
+#dcp-ok{background:linear-gradient(135deg,#c0392b,#96281b);color:#fff;box-shadow:0 3px 10px rgba(192,57,43,.4);}
+#dcp-ok:hover{transform:translateY(-1px);box-shadow:0 5px 14px rgba(192,57,43,.55);}
+#dcp-ok:active{transform:translateY(0);}
 
 .tpl-pop{position:fixed;background:var(--chrome-2);border:1px solid var(--chrome-border);border-radius:var(--r-md);box-shadow:var(--sh-lg);padding:7px;z-index:1100;display:none;width:180px;}
 .tpl-pop.open{display:block;}
@@ -462,6 +485,16 @@ body.present-mode .present-exit{display:flex;}
       <button class="icon-btn" id="btnClosePages" style="width:24px;height:24px;font-size:11px">✕</button>
     </div>
     <div id="page-thumbs"></div>
+    <!-- delete confirmation panel — slides up from bottom of rail -->
+    <div id="delete-confirm-panel">
+      <div class="dcp-icon">🗑</div>
+      <div class="dcp-title">Delete page?</div>
+      <div class="dcp-sub" id="dcp-page-name"></div>
+      <div class="dcp-btns">
+        <button id="dcp-cancel">Keep it</button>
+        <button id="dcp-ok">Delete</button>
+      </div>
+    </div>
     <button id="add-page-btn">＋ New Page <span style="opacity:.6">▾</span></button>
   </aside>
 </div>
@@ -1203,19 +1236,77 @@ function renderStroke(ctx,s){
   }
 }
 
-/* ---------------- DRAWING INTERACTION ---------------- */
+/* ========== DRAWING INTERACTION — HIGH-PERFORMANCE ENGINE ================
+   Architecture:
+   · bg-canvas     – background/template (never touched mid-stroke)
+   · draw-canvas   – committed strokes only (never cleared mid-stroke)
+   · overlay-canvas – live stroke ONLY, cleared each RAF frame
+
+   On pointermove we collect points (getCoalescedEvents for sub-frame tablet
+   data) and schedule ONE rAF frame. The frame renders ONLY the live stroke
+   onto the overlay. draw-canvas is never touched until pointerup.
+   Cost per frame = O(current stroke length), not O(all strokes). ========== */
 let drawing=false, curPts=[], curStroke=null, startX=0, startY=0, dragEl=null, dragOffset=null, resizingEl=null;
+let _liveCtx=null, _rafId=null, _needsRender=false;
 
 function pagePos(e){
   const wrap=document.querySelector('.notebook-page'); const r=wrap.getBoundingClientRect();
-  // Pressure support for graphics tablets / pen displays (e.g. XP-Pen): a real
-  // pen reports 0..1 pressure; mouse/most touch report 0, which we treat as
-  // a neutral mid pressure so non-pressure devices behave as before.
   let p=0.5;
   if(typeof e.pressure==='number' && e.pressure>0) p=e.pressure;
   else if(e.pointerType==='mouse') p=0.5;
   return {x:(e.clientX-r.left)/Store.zoom, y:(e.clientY-r.top)/Store.zoom, t:performance.now(), p};
 }
+
+/* Render only the in-progress stroke onto the overlay — called via rAF */
+function renderLiveStroke(){
+  _rafId=null; _needsRender=false;
+  if(!_liveCtx || !curStroke || !drawing) return;
+  const ctx=_liveCtx;
+  ctx.clearRect(0,0,PAGE_W,PAGE_H);
+  if(Store.rulerOn) drawRuler(ctx);
+  if(Store.protractorOn) drawProtractor(ctx);
+  if(curStroke.kind==='free'){
+    const pen=PenLibrary.get(curStroke.pen);
+    strokeBaseSetup(ctx, curStroke, pen);
+    ctx._baseAlpha = curStroke.opacity ?? pen.opacity;
+    if(pen.texture==='flat-multiply') ctx.globalCompositeOperation='multiply';
+    const widths=computeWidths(curPts, pen, curStroke.width);
+    const grain = pen.texture==='grain'?'soft':pen.texture==='grain-fine'?'fine':pen.texture==='grain-coarse'?'coarse':null;
+    if(pen.texture==='angled'){
+      for(let i=0;i<curPts.length-1;i++){
+        const w=(widths[i]+widths[i+1])/2;
+        ctx.save(); ctx.translate(curPts[i].x,curPts[i].y); ctx.rotate(-0.5);
+        ctx.beginPath(); ctx.ellipse(0,0,w*0.85,w*0.32,0,0,7); ctx.fill(); ctx.restore();
+      }
+    } else { renderVariableStroke(ctx, curPts, widths, grain); }
+    ctx.globalCompositeOperation='source-over';
+  } else if(curStroke.kind==='shape'){
+    const s=curStroke;
+    ctx.globalAlpha=1; ctx.strokeStyle=s.color; ctx.fillStyle=s.color;
+    ctx.lineWidth=s.width; ctx.lineCap='round'; ctx.lineJoin='round';
+    ctx.setLineDash([]); ctx.shadowBlur=0;
+    if(s.shapeType==='line'||s.shapeType==='arrow'){
+      ctx.beginPath(); ctx.moveTo(s.x1,s.y1); ctx.lineTo(s.x2,s.y2); ctx.stroke();
+      if(s.shapeType==='arrow'){ const ang=Math.atan2(s.y2-s.y1,s.x2-s.x1)*180/Math.PI; arrowHead(ctx,s.x2,s.y2,ang,s.color); }
+    } else if(s.shapeType==='rect'){
+      const x=Math.min(s.x1,s.x2),y=Math.min(s.y1,s.y2),w=Math.abs(s.x2-s.x1),h=Math.abs(s.y2-s.y1);
+      if(s.fill){ctx.globalAlpha=.18;ctx.fillRect(x,y,w,h);ctx.globalAlpha=1;} ctx.strokeRect(x,y,w,h);
+    } else if(s.shapeType==='circle'){
+      const cx=(s.x1+s.x2)/2,cy=(s.y1+s.y2)/2,rx=Math.abs(s.x2-s.x1)/2,ry=Math.abs(s.y2-s.y1)/2;
+      ctx.beginPath(); ctx.ellipse(cx,cy,rx,ry,0,0,7);
+      if(s.fill){ctx.globalAlpha=.18;ctx.fill();ctx.globalAlpha=1;} ctx.stroke();
+    } else if(s.shapeType==='triangle'){
+      ctx.beginPath(); ctx.moveTo((s.x1+s.x2)/2,s.y1); ctx.lineTo(s.x1,s.y2); ctx.lineTo(s.x2,s.y2); ctx.closePath();
+      if(s.fill){ctx.globalAlpha=.18;ctx.fill();ctx.globalAlpha=1;} ctx.stroke();
+    } else if(s.shapeType==='bracket'){
+      const x=Math.min(s.x1,s.x2),y1=Math.min(s.y1,s.y2),y2=Math.max(s.y1,s.y2);
+      ctx.beginPath(); ctx.moveTo(x+10,y1); ctx.lineTo(x,y1); ctx.lineTo(x,y2); ctx.lineTo(x+10,y2); ctx.stroke();
+    }
+  }
+  ctx.globalAlpha=1; ctx.shadowBlur=0; ctx.setLineDash([]);
+}
+function scheduleRender(){ if(!_needsRender||_rafId) return; _rafId=requestAnimationFrame(renderLiveStroke); }
+
 function attachStageEvents(){
   const cl=document.getElementById('overlay-canvas');
   if(!cl) return;
@@ -1230,11 +1321,7 @@ function attachStageEvents(){
 }
 function onPointerDown(e){
   const tool=Store.tool;
-  if(tool==='select') return;
-  if(tool==='ruler'||tool==='protractor') return;
-  // Claim the pointer so a fast tablet stroke can't be stolen mid-draw by the
-  // browser (scroll, palm rejection, etc.) — critical for XP-Pen and similar
-  // graphics tablets where pointerup/leave can otherwise fire prematurely.
+  if(tool==='select'||tool==='ruler'||tool==='protractor') return;
   if(e.pointerId!=null && e.target.setPointerCapture){ try{ e.target.setPointerCapture(e.pointerId); }catch(err){} }
   e.preventDefault();
   const p=pagePos(e);
@@ -1248,41 +1335,65 @@ function onPointerDown(e){
     drawStrokes(page); markDirty(); refreshThumb(); return;
   }
   drawing=true; startX=p.x; startY=p.y; curPts=[p];
+  _liveCtx=ovCtx();
   if(tool==='pen'){
     const pen=PenLibrary.get(Store.penId);
     curStroke={kind:'free', pen:Store.penId, color:Store.color, width:Store.size*(pen.baseWidth/3)+pen.baseWidth*0.4, opacity:Store.opacity??pen.opacity, pts:curPts};
   } else if(SHAPES.some(s=>s.id===tool)){
     curStroke={kind:'shape', shapeType:tool, color:Store.color, width:Store.size*0.8+1, fill:!!Store.fillShape, x1:p.x,y1:p.y,x2:p.x,y2:p.y};
   }
+  _needsRender=true; scheduleRender();
 }
 function onPointerMove(e){
   if(!drawing) return;
   e.preventDefault();
-  const p=pagePos(e);
   const tool=Store.tool;
+  /* getCoalescedEvents captures ALL sub-frame pointer positions the OS buffered
+     between the last delivered event and this one — critical for smooth tablet
+     input at high report rates (e.g. XP-Pen at 8000 Hz with 133 Hz screen). */
+  const events=e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
   if(tool==='pen'){
-    curPts.push(p);
-    const pen=PenLibrary.get(Store.penId);
-    const smoothed=smoothPts(curPts, pen.stabilize);
-    curStroke.pts=smoothed;
-    redrawLivePage();
-    const ctx=drawCtx(); renderStroke(ctx, curStroke);
-    ctx.globalAlpha=1; ctx.shadowBlur=0; ctx.setLineDash([]); ctx.globalCompositeOperation='source-over';
+    for(const ev of events) curPts.push(pagePos(ev));
+    /* Apply smoothing only to the recent tail so the path doesn't drift.
+       Smoothing the entire array each frame causes accumulating errors. */
+    if(curPts.length>=3){
+      const pen=PenLibrary.get(Store.penId);
+      const TAIL=Math.min(curPts.length, 12);
+      const start=curPts.length-TAIL;
+      const tail=smoothPts(curPts.slice(start), pen.stabilize);
+      curPts.splice(start, TAIL, ...tail);
+    }
   } else if(SHAPES.some(s=>s.id===tool)){
+    const p=pagePos(e);
     curStroke.x2=p.x; curStroke.y2=p.y;
-    if(Store.snap){ const dx=p.x-startX, dy=p.y-startY; if(Math.abs(dx)>Math.abs(dy)*2) curStroke.y2=startY; else if(Math.abs(dy)>Math.abs(dx)*2) curStroke.x2=startX; }
-    redrawLivePage();
-    const ctx=drawCtx(); renderStroke(ctx,curStroke); ctx.globalAlpha=1;
+    if(Store.snap){ const dx=p.x-startX,dy=p.y-startY; if(Math.abs(dx)>Math.abs(dy)*2) curStroke.y2=startY; else if(Math.abs(dy)>Math.abs(dx)*2) curStroke.x2=startX; }
   }
+  _needsRender=true; scheduleRender();
 }
 function onPointerUp(){
   if(!drawing) return;
   drawing=false;
+  if(_rafId){ cancelAnimationFrame(_rafId); _rafId=null; }
   if(curStroke){
+    /* Final smooth pass then permanently commit to draw-canvas */
+    if(curStroke.kind==='free'){
+      const pen=PenLibrary.get(curStroke.pen);
+      curStroke.pts=smoothPts(curPts, pen.stabilize);
+    }
+    const dCtx=drawCtx();
+    renderStroke(dCtx, curStroke);
+    dCtx.globalAlpha=1; dCtx.shadowBlur=0; dCtx.setLineDash([]); dCtx.globalCompositeOperation='source-over';
     Store.pages[Store.activeIndex].strokes.push(curStroke);
     markDirty(); refreshThumb();
   }
-  curStroke=null;
+  /* Clear overlay, keep ruler/protractor */
+  if(_liveCtx){
+    _liveCtx.clearRect(0,0,PAGE_W,PAGE_H);
+    if(Store.rulerOn) drawRuler(_liveCtx);
+    if(Store.protractorOn) drawProtractor(_liveCtx);
+    _liveCtx.globalAlpha=1; _liveCtx.shadowBlur=0; _liveCtx.setLineDash([]);
+  }
+  curStroke=null; curPts=[]; _liveCtx=null; _needsRender=false;
 }
 function redrawLivePage(){ drawStrokes(Store.pages[Store.activeIndex]); }
 
@@ -1704,13 +1815,29 @@ function duplicatePage(i){
   const np={id:pid++, bg:copy.bg, name:src.name+' (copy)', strokes:copy.strokes, elements:copy.elements, pdfDataUrl:src.pdfDataUrl||null, bookmark:false};
   Store.pages.splice(i+1,0,np); goPage(i+1); markDirty(); toast('Page duplicated','⧉');
 }
+/* ── Delete page — premium inline confirmation (no browser confirm() dialog) */
+let _deleteTargetIdx=null;
 function deletePage(i){
   if(Store.pages.length===1){ toast('Cannot delete the only page','⚠'); return; }
-  if(!confirm('Delete this page?')) return;
+  _deleteTargetIdx=i;
+  const panel=document.getElementById('delete-confirm-panel');
+  document.getElementById('dcp-page-name').textContent=Store.pages[i].name;
+  panel.classList.add('show');
+  /* scroll the panel into view inside the rail */
+  panel.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+document.getElementById('dcp-cancel').addEventListener('click',()=>{
+  _deleteTargetIdx=null;
+  document.getElementById('delete-confirm-panel').classList.remove('show');
+});
+document.getElementById('dcp-ok').addEventListener('click',()=>{
+  document.getElementById('delete-confirm-panel').classList.remove('show');
+  if(_deleteTargetIdx===null) return;
+  const i=_deleteTargetIdx; _deleteTargetIdx=null;
   Store.pages.splice(i,1);
   Store.activeIndex=Math.min(Store.activeIndex,Store.pages.length-1);
   goPage(Store.activeIndex); markDirty(); toast('Page deleted','🗑');
-}
+});
 function addPageQuick(){
   const np=newPage('ruled');
   Store.pages.splice(Store.activeIndex+1,0,np);
