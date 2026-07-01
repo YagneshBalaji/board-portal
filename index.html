@@ -457,6 +457,7 @@ body.present-mode .present-exit{display:flex;}
   animation:loginIn .4s cubic-bezier(.22,.8,.32,1);
 }
 @keyframes loginIn{from{opacity:0;transform:translateY(18px) scale(.97);}to{opacity:1;transform:translateY(0) scale(1);}}
+@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-10px)}40%{transform:translateX(10px)}60%{transform:translateX(-6px)}80%{transform:translateX(6px)}}
 .login-logo{
   width:80px;height:80px;border-radius:50%;
   background:#fff;
@@ -2303,59 +2304,55 @@ init();
    The middleware will inject them into the page at request time.
 ═══════════════════════════════════════════════════════════════════════════ */
 (function initLogin(){
-  /* --- credentials source ------------------------------------------------ */
-  const AUTH = window.__WAVES_AUTH__ || { user: 'waves', pass: 'coaching2024' };
-  const SESSION_KEY = 'waves_board_auth_v1';
-
-  /* --- already logged in? ------------------------------------------------ */
-  function isAuthed(){
-    try{ return sessionStorage.getItem(SESSION_KEY) === btoa(AUTH.user + ':' + AUTH.pass); }
-    catch(e){ return false; }
-  }
-  function doLogin(){
-    try{ sessionStorage.setItem(SESSION_KEY, btoa(AUTH.user + ':' + AUTH.pass)); }catch(e){}
-  }
+  /* ── SET YOUR CREDENTIALS HERE ───────────────────────────────────────── */
+  const CORRECT_USER = 'waves';
+  const CORRECT_PASS = 'coaching2024';
+  /* ──────────────────────────────────────────────────────────────────────── */
 
   const screen = document.getElementById('login-screen');
-  const userEl  = document.getElementById('loginUser');
-  const passEl  = document.getElementById('loginPass');
-  const btnEl   = document.getElementById('loginBtn');
-  const errEl   = document.getElementById('loginErr');
+  const userEl = document.getElementById('loginUser');
+  const passEl = document.getElementById('loginPass');
+  const btnEl  = document.getElementById('loginBtn');
+  const errEl  = document.getElementById('loginErr');
+
+  /* Check if already logged in this session */
+  let authed = false;
+  try { authed = sessionStorage.getItem('wcc_ok') === '1'; } catch(e){}
+  if(authed){ screen.classList.add('hidden'); return; }
+
+  /* Show the login screen */
+  screen.classList.remove('hidden');
+  setTimeout(()=>{ userEl.focus(); }, 100);
 
   function tryLogin(){
-    const u = userEl.value.trim();
+    const u = userEl.value.trim().toLowerCase();
     const p = passEl.value;
-    if(u === AUTH.user && p === AUTH.pass){
-      doLogin();
-      screen.style.transition = 'opacity .4s';
+
+    if(u === CORRECT_USER.toLowerCase() && p === CORRECT_PASS){
+      /* SUCCESS */
+      try{ sessionStorage.setItem('wcc_ok','1'); }catch(e){}
+      errEl.textContent = '';
+      screen.style.transition = 'opacity .35s';
       screen.style.opacity = '0';
-      setTimeout(()=>{ screen.classList.add('hidden'); screen.style.opacity=''; }, 420);
+      setTimeout(()=>{
+        screen.classList.add('hidden');
+        screen.style.opacity = '';
+        screen.style.transition = '';
+      }, 380);
     } else {
-      errEl.textContent = 'Incorrect username or password.';
+      /* FAIL */
+      errEl.textContent = '✕  Incorrect username or password';
       passEl.value = '';
       passEl.focus();
-      screen.querySelector('.login-card').style.animation = 'none';
-      /* shake animation */
       const card = screen.querySelector('.login-card');
-      card.style.transition = 'transform .08s';
-      card.style.transform = 'translateX(-8px)';
-      setTimeout(()=>{ card.style.transform='translateX(8px)'; },80);
-      setTimeout(()=>{ card.style.transform='translateX(-5px)'; },160);
-      setTimeout(()=>{ card.style.transform='translateX(0)'; card.style.transition=''; },240);
+      card.style.animation = 'shake .35s ease';
+      card.addEventListener('animationend', ()=>{ card.style.animation=''; }, {once:true});
     }
   }
 
-  if(isAuthed()){
-    screen.classList.add('hidden');
-    return;
-  }
-  /* show login; block the app */
-  screen.classList.remove('hidden');
   btnEl.addEventListener('click', tryLogin);
   passEl.addEventListener('keydown', e=>{ if(e.key==='Enter') tryLogin(); });
   userEl.addEventListener('keydown', e=>{ if(e.key==='Enter') passEl.focus(); });
-  userEl.focus();
-  /* clear error on typing */
   [userEl, passEl].forEach(el=>el.addEventListener('input',()=>{ errEl.textContent=''; }));
 })();
 </script>
