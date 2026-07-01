@@ -762,8 +762,19 @@ body.present-mode .present-exit{display:flex;}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
-pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-const { jsPDF } = window.jspdf;
+/* Guard against CDN load failures (ad-blockers, offline, firewall, CDN
+   outage). Without this guard, a failed pdf.js/jspdf load throws here and
+   silently kills every script below it on the page — including the login
+   handler — leaving the login screen visible but completely unresponsive. */
+try{
+  if (typeof pdfjsLib !== 'undefined') {
+    pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  } else {
+    console.error('WAVES Board: pdf.js failed to load from CDN — PDF import/export will be unavailable, but the rest of the app (including login) will still work.');
+  }
+}catch(e){ console.error('WAVES Board: error initializing pdf.js', e); }
+const jsPDF = (window.jspdf && window.jspdf.jsPDF) || null;
+if(!jsPDF){ console.error('WAVES Board: jsPDF failed to load from CDN — PDF export will be unavailable.'); }
 
 /* ---------------- BRAND ASSETS ----------------
    The official WAVES Coaching Center logo, embedded so the notebook is a
@@ -1634,10 +1645,16 @@ function redrawLivePage(){ drawStrokes(Store.pages[Store.activeIndex]); }
     ctx.setLineDash([]);
   }
 
-  const cl=document.getElementById('overlay-canvas');
-
-  cl.addEventListener('pointerdown', e=>{
+  /* NOTE: overlay-canvas is destroyed and recreated on every renderPageStage()
+     call (page switch / zoom / etc.), and does not exist at all yet when this
+     IIFE first runs at script-load time. Binding directly to a captured
+     element reference (as earlier code here did) either throws immediately
+     on load (killing all script below it, including the login handler) or
+     silently stops working after the first page re-render. Delegate from
+     document instead, exactly like the ruler/protractor drag handlers do. */
+  document.addEventListener('pointerdown', e=>{
     if(Store.tool!=='eraser') return;
+    if(!e.target.closest('#overlay-canvas')) return;
     if(e.pointerId!=null && e.target.setPointerCapture){ try{ e.target.setPointerCapture(e.pointerId); }catch(er){} }
     e.preventDefault();
     erasing=true;
