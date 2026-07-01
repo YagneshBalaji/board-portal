@@ -488,6 +488,34 @@ body.present-mode .present-exit{display:flex;}
   min-height:16px;transition:.2s;letter-spacing:.2px;
 }
 .login-footer{margin-top:24px;font-size:10px;color:rgba(255,255,255,.2);letter-spacing:.5px;}
+
+/* ═══════════════ PAGE THUMBNAIL CARDS (tc-*) ═══════════════ */
+.thumb-card{
+  background:#0d1a2b;
+  border:2px solid rgba(255,255,255,.08);
+  border-radius:12px;
+  cursor:pointer;
+  transition:border-color .15s,box-shadow .15s;
+  box-shadow:0 3px 12px rgba(0,0,0,.4);
+  margin-bottom:10px;
+}
+.thumb-card:hover{border-color:rgba(140,180,220,.35);}
+.thumb-card.active{border-color:#d9ad6f;box-shadow:0 0 0 2px rgba(217,173,111,.3),0 4px 18px rgba(0,0,0,.5);}
+.tc-preview{width:100%;aspect-ratio:16/9;background:#f5f0e3;border-radius:10px 10px 0 0;position:relative;overflow:hidden;}
+.tc-preview canvas{width:100%;height:100%;}
+.tc-bm{position:absolute;top:0;right:10px;width:12px;height:17px;background:#c0392b;clip-path:polygon(0 0,100% 0,100% 100%,50% 77%,0 100%);display:none;}
+.tc-bm.on{display:block;}
+.tc-num{position:absolute;top:6px;left:6px;background:rgba(8,18,32,.75);color:rgba(255,255,255,.9);font-size:9px;font-weight:800;font-family:'JetBrains Mono',monospace;padding:2px 7px;border-radius:5px;border:1px solid rgba(255,255,255,.12);}
+.tc-body{padding:8px 8px 7px;background:#091624;border-top:1px solid rgba(255,255,255,.07);border-radius:0 0 10px 10px;}
+.tc-name{font-size:11px;font-weight:700;color:#a8c0d8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:7px;}
+.tc-row{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;margin-bottom:5px;}
+.tc-btn{height:32px;border-radius:7px;font-size:13px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:#7a9fc0;cursor:pointer;transition:.13s;}
+.tc-btn:hover{background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.22);}
+.tc-btn:disabled{opacity:.2;cursor:default;pointer-events:none;}
+.tc-del{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;height:38px;border-radius:8px;font-size:13px;font-weight:800;letter-spacing:.4px;background:rgba(180,40,30,.18);border:1.5px solid rgba(200,60,50,.45);color:#e07060;cursor:pointer;transition:.15s;box-sizing:border-box;}
+.tc-del:hover{background:rgba(200,50,40,.38);border-color:rgba(230,80,65,.8);color:#ff9080;box-shadow:0 3px 14px rgba(200,50,40,.4);transform:translateY(-1px);}
+.tc-del:active{transform:translateY(0);}
+/* ════════════════════════════════════════════════════════════ */
 </style>
 </head>
 <body>
@@ -1522,52 +1550,129 @@ function onPointerUp(){
 }
 function redrawLivePage(){ drawStrokes(Store.pages[Store.activeIndex]); }
 
-/* eraser uses its own pointer loop since it doesn't fit the draw model */
+/* ═══════════════════════════════════════════════════════════════════
+   ERASER — high-performance, RAF-batched, coalesced-events
+   ·  Collects erase-points between frames (like the pen engine)
+   ·  Redraws draw-canvas ONCE per frame, not once per pointer event
+   ·  Visual cursor shows erase radius live on the overlay canvas
+   ·  Works perfectly with XP-Pen and other graphic tablets
+═══════════════════════════════════════════════════════════════════ */
 (function setupEraser(){
   let erasing=false;
-  document.addEventListener('pointerdown', e=>{
-    if(Store.tool!=='eraser' || !e.target.closest('#overlay-canvas')) return;
-    erasing=true; pushHistorySnapshot(); eraseAt(pagePos(e));
-  });
-  document.addEventListener('pointermove', e=>{
-    if(erasing && Store.tool==='eraser') eraseAt(pagePos(e));
-  });
-  document.addEventListener('pointerup', ()=>{ erasing=false; });
-})();
-function eraseAt(p){
-  const page=Store.pages[Store.activeIndex];
-  const radius=(Store.eraseSize||24)/2;
-  const before=page.strokes.length;
-  if(Store.eraseMode==='stroke'){
-    page.strokes = page.strokes.filter(s=>{
-      if(s.kind==='free'){ return !s.pts.some(pt=>Math.hypot(pt.x-p.x,pt.y-p.y)<radius); }
-      if(s.kind==='stamp'){ return Math.hypot(s.x-p.x,s.y-p.y)>radius+10; }
-      if(s.kind==='shape'){ return distToSeg(p,s.x1,s.y1,s.x2,s.y2)>radius; }
-      return true;
-    });
-  } else {
-    // precision: trim points within radius from free strokes (split if needed), remove shapes/stamps fully hit
-    const next=[];
-    page.strokes.forEach(s=>{
-      if(s.kind==='free'){
-        let cur=[];
-        s.pts.forEach(pt=>{
-          if(Math.hypot(pt.x-p.x,pt.y-p.y)<radius){
-            if(cur.length>1) next.push({...s, pts:cur});
-            cur=[];
-          } else cur.push(pt);
-        });
-        if(cur.length>1) next.push({...s, pts:cur});
-      } else if(s.kind==='stamp'){
-        if(Math.hypot(s.x-p.x,s.y-p.y)>radius+10) next.push(s);
-      } else if(s.kind==='shape'){
-        if(distToSeg(p,s.x1,s.y1,s.x2,s.y2)>radius) next.push(s);
-      } else next.push(s);
-    });
-    page.strokes=next;
+  let _eraseQueue=[];   // points collected since last frame
+  let _eraseRaf=null;   // pending RAF handle
+  let _lastCursor=null; // last known cursor pos for hover circle
+
+  function scheduleErase(){
+    if(_eraseRaf) return;
+    _eraseRaf=requestAnimationFrame(flushErase);
   }
-  if(page.strokes.length!==before || Store.eraseMode==='pixel'){ drawStrokes(page); markDirty(); refreshThumb(); }
-}
+
+  function flushErase(){
+    _eraseRaf=null;
+    if(!_eraseQueue.length) return;
+    const page=Store.pages[Store.activeIndex];
+    const radius=(Store.eraseSize||32);
+    let changed=false;
+
+    for(const p of _eraseQueue){
+      const before=page.strokes.length;
+      if(Store.eraseMode==='stroke'){
+        page.strokes=page.strokes.filter(s=>{
+          if(s.kind==='free') return !s.pts.some(pt=>Math.hypot(pt.x-p.x,pt.y-p.y)<radius);
+          if(s.kind==='stamp') return Math.hypot(s.x-p.x,s.y-p.y)>radius+10;
+          if(s.kind==='shape') return distToSeg(p,s.x1,s.y1,s.x2,s.y2)>radius;
+          return true;
+        });
+      } else {
+        const next=[];
+        page.strokes.forEach(s=>{
+          if(s.kind==='free'){
+            let cur=[];
+            s.pts.forEach(pt=>{
+              if(Math.hypot(pt.x-p.x,pt.y-p.y)<radius){
+                if(cur.length>1) next.push({...s,pts:[...cur]});
+                cur=[];
+              } else cur.push(pt);
+            });
+            if(cur.length>1) next.push({...s,pts:cur});
+          } else if(s.kind==='stamp'){
+            if(Math.hypot(s.x-p.x,s.y-p.y)>radius+10) next.push(s);
+          } else if(s.kind==='shape'){
+            if(distToSeg(p,s.x1,s.y1,s.x2,s.y2)>radius) next.push(s);
+          } else next.push(s);
+        });
+        page.strokes=next;
+      }
+      if(page.strokes.length!==before) changed=true;
+    }
+    _eraseQueue=[];
+
+    if(changed){
+      // Redraw committed canvas ONCE for the whole batch
+      drawStrokes(page);
+      markDirty(); refreshThumb();
+    }
+
+    // Draw eraser cursor circle on overlay every frame
+    drawEraserCursor(_lastCursor);
+  }
+
+  function drawEraserCursor(p){
+    const ctx=ovCtx(); if(!ctx||!p) return;
+    ctx.clearRect(0,0,PAGE_W,PAGE_H);
+    if(Store.rulerOn) drawRuler(ctx);
+    if(Store.protractorOn) drawProtractor(ctx);
+    const r=(Store.eraseSize||32);
+    ctx.save();
+    ctx.beginPath(); ctx.arc(p.x,p.y,r,0,Math.PI*2);
+    ctx.strokeStyle='rgba(220,80,60,.9)'; ctx.lineWidth=1.5;
+    ctx.setLineDash([4,3]); ctx.stroke();
+    ctx.fillStyle='rgba(220,80,60,.08)'; ctx.fill();
+    ctx.restore();
+    ctx.setLineDash([]);
+  }
+
+  const cl=document.getElementById('overlay-canvas');
+
+  cl.addEventListener('pointerdown', e=>{
+    if(Store.tool!=='eraser') return;
+    if(e.pointerId!=null && e.target.setPointerCapture){ try{ e.target.setPointerCapture(e.pointerId); }catch(er){} }
+    e.preventDefault();
+    erasing=true;
+    pushHistorySnapshot();
+    const pts=e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for(const ev of pts){ const p=pagePos(ev); _lastCursor=p; _eraseQueue.push(p); }
+    scheduleErase();
+  });
+
+  document.addEventListener('pointermove', e=>{
+    if(Store.tool!=='eraser') return;
+    e.preventDefault();
+    const pts=e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    const last=pagePos(pts[pts.length-1]); _lastCursor=last;
+    if(erasing){
+      for(const ev of pts) _eraseQueue.push(pagePos(ev));
+      scheduleErase();
+    } else {
+      // hover: just show cursor circle, no erase
+      if(!_eraseRaf) _eraseRaf=requestAnimationFrame(()=>{ _eraseRaf=null; drawEraserCursor(_lastCursor); });
+    }
+  });
+
+  document.addEventListener('pointerup', ()=>{
+    if(!erasing) return;
+    erasing=false;
+    // flush any remaining points
+    if(_eraseQueue.length) flushErase();
+    // clear cursor
+    const ctx=ovCtx(); if(ctx){
+      ctx.clearRect(0,0,PAGE_W,PAGE_H);
+      if(Store.rulerOn) drawRuler(ctx);
+      if(Store.protractorOn) drawProtractor(ctx);
+    }
+  });
+})();
 function distToSeg(p,x1,y1,x2,y2){
   const A=p.x-x1,B=p.y-y1,C=x2-x1,D=y2-y1; const dot=A*C+B*D; const len=C*C+D*D;
   let t=len?dot/len:0; t=Math.max(0,Math.min(1,t));
@@ -1850,27 +1955,23 @@ function renderThumbs(){
     const card=document.createElement('div'); card.className='thumb-card'+(i===Store.activeIndex?' active':'');
     card.draggable=true; card.dataset.idx=i;
     card.innerHTML=`
-      <div class="thumb-canvas-wrap" id="thumbwrap-${p.id}">
-        <div class="thumb-bookmark ${p.bookmark?'on':''}"></div>
-        <div class="thumb-pg-badge">${i+1}</div>
+      <div class="tc-preview" id="thumbwrap-${p.id}">
+        <div class="tc-bm ${p.bookmark?'on':''}"></div>
+        <div class="tc-num">${i+1} / ${Store.pages.length}</div>
       </div>
-      <div class="thumb-info">
-        <div class="thumb-name-row">
-          <span class="thumb-name" title="${p.name}">${p.name}</span>
-          <button class="thumb-bm-btn ${p.bookmark?'on':''}" data-act="bm" title="${p.bookmark?'Remove bookmark':'Bookmark'}">${p.bookmark?'🔖':'📑'}</button>
+      <div class="tc-body">
+        <div class="tc-name">${p.name}</div>
+        <div class="tc-row">
+          <button class="tc-btn" data-act="up"     ${i===0?'disabled':''} title="Move up">▲</button>
+          <button class="tc-btn" data-act="down"   ${i===Store.pages.length-1?'disabled':''} title="Move down">▼</button>
+          <button class="tc-btn" data-act="dup"    title="Duplicate">⧉</button>
+          <button class="tc-btn" data-act="rename" title="Rename">✎</button>
         </div>
-        <div class="thumb-actions">
-          <button data-act="up"   title="Move up"    ${i===0?'disabled':''}>▲</button>
-          <button data-act="down" title="Move down"  ${i===Store.pages.length-1?'disabled':''}>▼</button>
-          <button data-act="rename" title="Rename">✎</button>
-          <button data-act="dup"  title="Duplicate page">⧉</button>
-          <button data-act="del"  title="Delete page" style="grid-column:span 4;height:26px;font-size:10px;letter-spacing:.4px;font-weight:700;">🗑 Delete</button>
-        </div>
+        <button class="tc-del" data-act="del">🗑&nbsp; Delete Page</button>
       </div>`;
-    card.addEventListener('click',(e)=>{ if(e.target.closest('.thumb-actions')||e.target.closest('.thumb-bm-btn')) return; goPage(i); });
+    card.addEventListener('click',(e)=>{ if(e.target.closest('.tc-row')||e.target.closest('.tc-del')) return; goPage(i); });
     card.querySelector('[data-act=up]').addEventListener('click',e=>{e.stopPropagation(); movePage(i,i-1);});
     card.querySelector('[data-act=down]').addEventListener('click',e=>{e.stopPropagation(); movePage(i,i+1);});
-    card.querySelector('[data-act=bm]').addEventListener('click',e=>{e.stopPropagation(); p.bookmark=!p.bookmark; renderThumbs(); renderPageStage(); markDirty();});
     card.querySelector('[data-act=rename]').addEventListener('click',e=>{e.stopPropagation(); renamingIndex=i; document.getElementById('renameInput').value=p.name; openModal('renameModal');});
     card.querySelector('[data-act=dup]').addEventListener('click',e=>{e.stopPropagation(); duplicatePage(i);});
     card.querySelector('[data-act=del]').addEventListener('click',e=>{e.stopPropagation(); deletePage(i);});
